@@ -168,6 +168,47 @@ def scan_senders(svc, on_progress):
 
 # ---------- TUI ----------
 
+# Arrow-key focus grid per view: rows of widget ids, navigated with ↑ ↓ ← →
+VIEW_ROWS = {"accounts": [["acc-add", "acc-switch", "acc-remove"], ["acc-table"]],
+             "senders": [["scan", "del-marked"], ["table"]],
+             "sender": [["addr"], ["del-sender"]]}
+
+
+class NavButton(Button):
+    BINDINGS = [Binding(k, f"nav('{k}')", show=False) for k in ("up", "down", "left", "right")]
+
+    def action_nav(self, direction):
+        (self.screen if isinstance(self.screen, Confirm) else self.app).nav(direction)
+
+
+class NavInput(Input):
+    BINDINGS = [Binding("up", "nav('up')", show=False), Binding("down", "nav('down')", show=False)]
+
+    def action_nav(self, direction):
+        self.app.nav(direction)
+
+    def action_cursor_left(self, select=False):
+        if self.cursor_position == 0 and not select:
+            self.app.nav("left")
+        else:
+            super().action_cursor_left(select)
+
+
+class NavTable(DataTable):
+    def action_cursor_up(self):
+        if self.cursor_row <= 0:
+            self.app.nav("up")
+        else:
+            super().action_cursor_up()
+
+    def action_cursor_left(self):
+        self.app.nav("left")
+
+
+class Menu(ListView):
+    BINDINGS = [Binding("right", "select_cursor", "Open")]
+
+
 class Confirm(ModalScreen[bool]):
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
@@ -180,11 +221,15 @@ class Confirm(ModalScreen[bool]):
             yield Label(f"[b red]{self.title}[/]")
             yield Label(self.msg, id="question")
             with Horizontal(id="buttons"):
-                yield Button("Cancel", id="no")
-                yield Button(self.action, variant="error", id="yes")
+                yield NavButton("Cancel", id="no")
+                yield NavButton(self.action, variant="error", id="yes")
 
     def on_mount(self):
         self.query_one("#no").focus()
+
+    def nav(self, direction):
+        if direction in ("left", "right"):
+            self.focus_previous() if direction == "left" else self.focus_next()
 
     def on_button_pressed(self, e):
         self.dismiss(e.button.id == "yes")
@@ -193,7 +238,7 @@ class Confirm(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class SenderTable(DataTable):
+class SenderTable(NavTable):
     BINDINGS = [Binding("space", "toggle", "Mark"), Binding("a", "mark_all", "Mark all"),
                 Binding("n", "unmark_all", "Unmark all")]
     marked: set
@@ -239,6 +284,8 @@ class CleanupApp(App):
     #buttons Button { margin-left: 2; }
     """
 
+    BINDINGS = [Binding("escape", "menu", "Menu")]
+
     def __init__(self, svc, me):
         super().__init__()
         self.svc, self.me, self.busy, self.sender_ids, self.counts = svc, me, False, [], {}
@@ -246,25 +293,25 @@ class CleanupApp(App):
     def compose(self):
         yield Header()
         with Horizontal():
-            yield ListView(*[ListItem(Label(t + (" [dim](…)[/]" if k in COUNTED else ""), id=f"l-{k}"),
+            yield Menu(*[ListItem(Label(t + (" [dim](…)[/]" if k in COUNTED else ""), id=f"l-{k}"),
                                       id=f"m-{k}") for k, t in MENU], id="menu")
             with Vertical(id="main"):
                 with ContentSwitcher(initial="home", id="views"):
                     yield Static(WELCOME, id="home")
                     with Vertical(id="accounts"):
                         with Horizontal(classes="bar"):
-                            yield Button("Add account", variant="primary", id="acc-add")
-                            yield Button("Switch to selected", variant="success", id="acc-switch")
-                            yield Button("Remove selected", variant="error", id="acc-remove")
-                        yield DataTable(id="acc-table", cursor_type="row", zebra_stripes=True)
+                            yield NavButton("Add account", variant="primary", id="acc-add")
+                            yield NavButton("Switch to selected", variant="success", id="acc-switch")
+                            yield NavButton("Remove selected", variant="error", id="acc-remove")
+                        yield NavTable(id="acc-table", cursor_type="row", zebra_stripes=True)
                     with Vertical(id="sender"):
-                        yield Input(placeholder="sender@example.com  (Enter to look up)", id="addr")
+                        yield NavInput(placeholder="sender@example.com  (Enter to look up)", id="addr")
                         yield Static(id="stats")
-                        yield Button("Delete all from this sender", variant="error", id="del-sender", disabled=True)
+                        yield NavButton("Delete all from this sender", variant="error", id="del-sender", disabled=True)
                     with Vertical(id="senders"):
                         with Horizontal(classes="bar"):
-                            yield Button("Scan mailbox", variant="primary", id="scan")
-                            yield Button("Delete marked", variant="error", id="del-marked")
+                            yield NavButton("Scan mailbox", variant="primary", id="scan")
+                            yield NavButton("Delete marked", variant="error", id="del-marked")
                         yield SenderTable(id="table", cursor_type="row", zebra_stripes=True)
                 yield ProgressBar(id="progress", show_eta=True)
                 yield RichLog(id="log", markup=True, wrap=True)
@@ -354,6 +401,44 @@ class CleanupApp(App):
                 self.call_from_thread(self.refresh_counts)
         self.run_worker(run, thread=True)
 
+    def action_menu(self):
+        self.query_one("#menu").focus()
+
+    def nav(self, direction):
+        rows = VIEW_ROWS.get(self.query_one("#views").current)
+        fid = self.focused.id if self.focused else None
+        pos = next(((r, c) for r, row in enumerate(rows or []) for c, i in enumerate(row) if i == fid), None)
+        if pos is None:
+            return
+        r, c = pos
+        if direction == "left":
+            if c == 0:
+                return self.action_menu()
+            c -= 1
+        elif direction == "right":
+            c = min(c + 1, len(rows[r]) - 1)
+        else:
+            step = -1 if direction == "up" else 1
+            r += step
+            while 0 <= r < len(rows) and all(self.query_one(f"#{i}").disabled for i in rows[r]):
+                r += step  # skip rows with nothing focusable
+            if not 0 <= r < len(rows):
+                return
+        target = self.query_one(f"#{rows[r][min(c, len(rows[r]) - 1)]}")
+        if not target.disabled:
+            target.focus()
+
+    def switch_selected(self):
+        email = self.selected_account()
+        if self.busy:
+            self.notify("Wait for the current task to finish.", severity="warning")
+        elif email and email != self.me:
+            self.switch_to(email)
+
+    def on_data_table_row_selected(self, e):
+        if e.data_table.id == "acc-table":
+            self.switch_selected()
+
     # events
     def on_list_view_selected(self, e):
         key = e.item.id[2:]
@@ -377,11 +462,7 @@ class CleanupApp(App):
         elif e.button.id == "acc-add":
             self.start(self.account_add)
         elif e.button.id == "acc-switch":
-            email = self.selected_account()
-            if self.busy:
-                self.notify("Wait for the current task to finish.", severity="warning")
-            elif email and email != self.me:
-                self.switch_to(email)
+            self.switch_selected()
         elif e.button.id == "acc-remove":
             email = self.selected_account()
             if email:

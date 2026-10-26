@@ -51,7 +51,9 @@ On the first run a browser opens so you can sign in. If Google warns that the ap
 
 ## 🖥️ Usage
 
-A full-screen terminal app (built with [Textual](https://github.com/Textualize/textual)) with mouse and keyboard support:
+A full-screen terminal app (built with [Textual](https://github.com/Textualize/textual)). Everything works with just the arrow keys, `Enter` and `Esc`, and the mouse works too:
+
+- `↑` `↓` `←` `→` move between the sidebar, buttons and tables. `→` or `Enter` opens a sidebar item, `←` or `Esc` goes back to the sidebar.
 
 - **Accounts:** add another Gmail account (opens Google sign-in), switch to the selected one, or remove it. Removing only deletes the saved login, not your emails.
 - **Left sidebar:** choose an action with `↑` `↓` and `Enter`, or click it.
