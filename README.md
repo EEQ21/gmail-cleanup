@@ -10,7 +10,7 @@ A simple terminal tool to clean up your Gmail fast. Find out who fills your mail
 - **Clear spam** instantly.
 - **Clear the Social, Promotions and Updates tabs** with one option each.
 - **Safe by default**: every delete shows what will be removed and asks you to type `yes`.
-- **Clean, colourful terminal UI** with progress bars and tables (powered by [rich](https://github.com/Textualize/rich)).
+- **Full-screen TUI** with sidebar, sortable sender table, progress bar and activity log.
 - Runs locally. Your mail goes only between your computer and Google.
 
 > ⚠️ **Deletes are permanent.** Emails skip the Trash and cannot be recovered.
@@ -50,29 +50,14 @@ On the first run a browser opens so you can sign in. If Google warns that the ap
 
 ## 🖥️ Usage
 
-```
-Gmail Cleanup - you@gmail.com
+A full-screen terminal app (built with [Textual](https://github.com/Textualize/textual)) with mouse and keyboard support:
 
-1) Delete all emails from a sender
-2) List all senders (and delete)
-3) Clear drafts (concepts)
-4) Clear spam
-5) Clear Social
-6) Clear Promotions (Reclame)
-7) Clear Updates
-q) Quit
-```
-
-Example sender overview:
-
-```
-   #  Emails  Sender
-   1     842  news@shop.com
-   2     310  noreply@social.com
-   3      97  updates@service.com
-
-Numbers to delete (e.g. 1,3,5-8, 'all', or Enter to cancel):
-```
+- **Left sidebar:** choose an action with `↑` `↓` and `Enter`, or click it.
+- **Delete by sender:** type an address and press `Enter` to see the email count and the first and most recent email, then click **Delete all from this sender**.
+- **All senders:** click **Scan mailbox**, then mark senders in the table with `Space` (`A` marks all, `N` unmarks all) and click **Delete marked**.
+- **Clear drafts / spam / Social / Promotions / Updates:** select one and confirm.
+- Every delete asks for confirmation in a popup. The activity log and progress bar show what's happening.
+- `Ctrl+Q` quits.
 
 ## 💡 Notes
 

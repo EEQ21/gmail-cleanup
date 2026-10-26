@@ -1,27 +1,47 @@
 #!/usr/bin/env python3
-"""Gmail cleanup tool: permanently delete mail from a sender, clear drafts and spam."""
+"""Gmail Cleanup TUI: bulk-delete mail by sender, see sender stats, clear drafts, spam and tabs."""
 import os
 import time
 from collections import Counter
-from email.utils import parseaddr
 from datetime import datetime
+from email.utils import parseaddr
+
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from rich import box
-from rich.console import Console
-from rich.panel import Panel
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
-from rich.prompt import Prompt
 from rich.table import Table
+from textual.app import App
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import (Button, ContentSwitcher, DataTable, Footer, Header, Input, Label,
+                             ListItem, ListView, ProgressBar, RichLog, Static)
 
 SCOPES = ["https://mail.google.com/"]  # full scope is required for permanent delete
 DIR = os.path.dirname(os.path.abspath(__file__))
 TOKEN = os.path.join(DIR, "token.json")
 CREDS = os.path.join(DIR, "credentials.json")
-console = Console()
 
+CATEGORIES = {"spam": ("SPAM", "Spam"), "social": ("CATEGORY_SOCIAL", "Social"),
+              "promo": ("CATEGORY_PROMOTIONS", "Promotions (Reclame)"),
+              "updates": ("CATEGORY_UPDATES", "Updates")}
+MENU = [("sender", "✉  Delete by sender"), ("senders", "☰  All senders"), ("drafts", "✎  Clear drafts"),
+        ("spam", "⚠  Clear spam"), ("social", "☺  Clear Social"), ("promo", "★  Clear Promotions"),
+        ("updates", "↻  Clear Updates")]
+WELCOME = """[b magenta]📬 Gmail Cleanup[/]
+
+Pick an action on the left with [b cyan]↑ ↓[/] and [b cyan]Enter[/].
+
+[b]Delete by sender[/]  type an address, see stats, delete everything from it
+[b]All senders[/]       scan your mailbox and see who sends you the most
+[b]Clear ...[/]         empty drafts, spam or a Gmail tab in one go
+
+[b red]Deletes are permanent[/] — emails skip the Trash.
+[dim]Ctrl+Q quits.[/]"""
+
+
+# ---------- Gmail ----------
 
 def connect():
     creds = Credentials.from_authorized_user_file(TOKEN, SCOPES) if os.path.exists(TOKEN) else None
@@ -56,191 +76,293 @@ def batch_delete(svc, ids):
         svc.users().messages().batchDelete(userId="me", body={"ids": ids[i:i + 1000]}).execute()
 
 
-def confirm(msg):
-    console.print(f"\n[bold red]⚠  {msg}[/]")
-    return Prompt.ask("[bold]Type [red]yes[/] to confirm[/]", default="no").strip().lower() == "yes"
-
-
-def clear():
-    console.clear()
-
-
-def ok(msg):
-    console.print(f"\n[bold green]✔[/] {msg}")
-
-
-def info(msg):
-    console.print(f"[dim]{msg}[/]")
-
-
-def fetch_ids(msg, **kw):
-    with console.status(f"[cyan]{msg}"):
-        return list_ids(**kw)
-
-
-def delete_sender(svc):
-    addr = Prompt.ask("[bold cyan]Sender email address[/]").strip()
-    if addr:
-        delete_from(svc, addr)
-
-
-def delete_from(svc, addr):
-    ids = fetch_ids(f"Searching emails from {addr}...", svc=svc, q=f"from:{addr}")
-    if not ids:
-        info("No emails found from that address.")
-        return
-    stats = Table.grid(padding=(0, 2))
-    stats.add_row("[dim]Emails[/]", f"[bold yellow]{len(ids)}[/]")
-    stats.add_row("[dim]First received[/]", msg_date(svc, ids[-1]))
-    stats.add_row("[dim]Most recent[/]", msg_date(svc, ids[0]))
-    console.print(Panel(stats, title=f"[bold]{addr}[/]", border_style="cyan", expand=False))
-    if confirm(f"PERMANENTLY delete these {len(ids)} emails? This cannot be undone."):
-        with console.status("[red]Deleting..."):
-            batch_delete(svc, ids)
-        ok(f"Deleted {len(ids)} emails.")
-
-
-def clear_spam(svc):
-    clear_category(svc, "SPAM", "Spam")
-
-
-def clear_category(svc, label, name):
-    ids = fetch_ids(f"Counting emails in {name}...", svc=svc, labels=[label])
-    if not ids:
-        info(f"{name} is already empty.")
-    elif confirm(f"Permanently delete {len(ids)} emails in {name}?"):
-        with console.status("[red]Deleting..."):
-            batch_delete(svc, ids)
-        ok(f"Deleted {len(ids)} emails from {name}.")
-
-
-def clear_drafts(svc):
+def list_drafts(svc):
     drafts, token = [], None
     while True:
-        with console.status("[cyan]Loading drafts..."):
-            r = svc.users().drafts().list(userId="me", pageToken=token, maxResults=500).execute()
+        r = svc.users().drafts().list(userId="me", pageToken=token, maxResults=500).execute()
         drafts += r.get("drafts", [])
         token = r.get("nextPageToken")
         if not token:
-            break
-    if not drafts:
-        info("No drafts.")
-    elif confirm(f"Permanently delete {len(drafts)} drafts?"):
-        with progress() as bar:
-            task = bar.add_task("Deleting drafts", total=len(drafts))
-            for d in drafts:
-                svc.users().drafts().delete(userId="me", id=d["id"]).execute()
-                bar.advance(task)
-        ok(f"Deleted {len(drafts)} drafts.")
+            return drafts
 
 
-def progress():
-    return Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}"), BarColumn(),
-                    MofNCompleteColumn(), TimeRemainingColumn(), console=console)
-
-
-def scan_senders(svc):
-    ids = fetch_ids("Listing emails...", svc=svc, q="-in:spam -in:trash -in:drafts -in:sent")
-    senders, delay = Counter(), 0.5
-
+def scan_senders(svc, on_progress):
+    ids = list_ids(svc, q="-in:spam -in:trash -in:drafts -in:sent")
+    senders, done, delay = Counter(), 0, 0.5
     queue = list(ids)
-    with progress() as bar:
-        task = bar.add_task("Scanning mailbox", total=len(ids))
-        while queue:
-            chunk, queue = queue[:25], queue[25:]
-            failed = []
+    while queue:
+        chunk, queue = queue[:25], queue[25:]
+        failed = []
 
-            def cb(rid, resp, err):
-                if err:
-                    failed.append(rid)
-                    return
-                hdr = next((h["value"] for h in resp["payload"].get("headers", []) if h["name"].lower() == "from"), "")
-                senders[parseaddr(hdr)[1].lower() or "(unknown)"] += 1
+        def cb(rid, resp, err):
+            if err:
+                failed.append(rid)
+                return
+            hdr = next((h["value"] for h in resp["payload"].get("headers", []) if h["name"].lower() == "from"), "")
+            senders[parseaddr(hdr)[1].lower() or "(unknown)"] += 1
 
-            batch = svc.new_batch_http_request(callback=cb)
-            for mid in chunk:
-                batch.add(svc.users().messages().get(userId="me", id=mid, format="metadata",
-                                                     metadataHeaders=["From"]), request_id=mid)
-            batch.execute()
-            bar.advance(task, len(chunk) - len(failed))
-            queue = failed + queue  # retry rate-limited ones right away, after a pause
-            delay = min(delay * 2, 10) if failed else 0.5
-            time.sleep(delay)
+        batch = svc.new_batch_http_request(callback=cb)
+        for mid in chunk:
+            batch.add(svc.users().messages().get(userId="me", id=mid, format="metadata",
+                                                 metadataHeaders=["From"]), request_id=mid)
+        batch.execute()
+        done += len(chunk) - len(failed)
+        on_progress(done, len(ids))
+        queue = failed + queue  # retry rate-limited ones right away, after a pause
+        delay = min(delay * 2, 10) if failed else 0.5
+        time.sleep(delay)
     return senders
 
 
-def list_senders(svc):
-    senders = scan_senders(svc).most_common()
-    if not senders:
-        info("No emails found.")
-        return
-    clear()
-    table = Table(box=box.SIMPLE_HEAVY, header_style="bold magenta", row_styles=["", "dim"],
-                  title=f"[bold]{len(senders)} senders · {sum(c for _, c in senders)} emails[/]")
-    table.add_column("#", justify="right", style="cyan")
-    table.add_column("Emails", justify="right", style="bold yellow")
-    table.add_column("Sender")
-    for n, (addr, cnt) in enumerate(senders, 1):
-        table.add_row(str(n), str(cnt), addr)
-    console.print(table)
-    pick = Prompt.ask("[bold cyan]Numbers to delete[/] [dim](e.g. 1,3,5-8, 'all', or Enter to cancel)[/]",
-                      default="", show_default=False).strip().lower()
-    if not pick:
-        return
-    chosen = set()
-    if pick == "all":
-        chosen = set(range(len(senders)))
-    else:
-        for part in pick.replace(" ", "").split(","):
+# ---------- TUI ----------
+
+class Confirm(ModalScreen[bool]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, msg):
+        super().__init__()
+        self.msg = msg
+
+    def compose(self):
+        with Vertical(id="dialog"):
+            yield Label("[b red]⚠  Permanent delete[/]")
+            yield Label(self.msg, id="question")
+            with Horizontal(id="buttons"):
+                yield Button("Cancel", id="no")
+                yield Button("Delete", variant="error", id="yes")
+
+    def on_mount(self):
+        self.query_one("#no").focus()
+
+    def on_button_pressed(self, e):
+        self.dismiss(e.button.id == "yes")
+
+    def action_cancel(self):
+        self.dismiss(False)
+
+
+class SenderTable(DataTable):
+    BINDINGS = [Binding("space", "toggle", "Mark"), Binding("a", "mark_all", "Mark all"),
+                Binding("n", "unmark_all", "Unmark all")]
+    marked: set
+
+    def set_mark(self, key, on):
+        (self.marked.add if on else self.marked.discard)(key)
+        self.update_cell(key, "mark", "[b red]✔[/]" if on else "")
+
+    def action_toggle(self):
+        if self.row_count:
+            key = self.coordinate_to_cell_key(self.cursor_coordinate).row_key.value
+            self.set_mark(key, key not in self.marked)
+            self.action_cursor_down()
+
+    def action_mark_all(self):
+        for row in list(self.rows):
+            self.set_mark(row.value, True)
+
+    def action_unmark_all(self):
+        for row in list(self.rows):
+            self.set_mark(row.value, False)
+
+
+class CleanupApp(App):
+    TITLE = "📬 Gmail Cleanup"
+    CSS = """
+    #menu { width: 30; border: round $accent; }
+    #main { padding: 0 1; }
+    #views { height: 1fr; }
+    #home { padding: 1 2; }
+    #sender, #senders { padding: 1 0 0 0; }
+    #stats { height: auto; margin: 1 0; }
+    .bar { height: auto; }
+    .bar Button { margin-right: 2; }
+    SenderTable { height: 1fr; border: round $primary; }
+    #progress { height: 1; margin: 1 0 0 0; }
+    #log { height: 9; border: round $primary; }
+    Confirm { align: center middle; }
+    #dialog { width: 64; height: auto; border: thick $error; background: $surface; padding: 1 2; }
+    #question { margin: 1 0; }
+    #buttons { height: auto; align-horizontal: right; }
+    #buttons Button { margin-left: 2; }
+    """
+
+    def __init__(self, svc, me):
+        super().__init__()
+        self.svc, self.me, self.busy, self.sender_ids, self.counts = svc, me, False, [], {}
+
+    def compose(self):
+        yield Header()
+        with Horizontal():
+            yield ListView(*[ListItem(Label(t), id=f"m-{k}") for k, t in MENU], id="menu")
+            with Vertical(id="main"):
+                with ContentSwitcher(initial="home", id="views"):
+                    yield Static(WELCOME, id="home")
+                    with Vertical(id="sender"):
+                        yield Input(placeholder="sender@example.com  (Enter to look up)", id="addr")
+                        yield Static(id="stats")
+                        yield Button("Delete all from this sender", variant="error", id="del-sender", disabled=True)
+                    with Vertical(id="senders"):
+                        with Horizontal(classes="bar"):
+                            yield Button("Scan mailbox", variant="primary", id="scan")
+                            yield Button("Delete marked", variant="error", id="del-marked")
+                        yield SenderTable(id="table", cursor_type="row", zebra_stripes=True)
+                yield ProgressBar(id="progress", show_eta=True)
+                yield RichLog(id="log", markup=True, wrap=True)
+        yield Footer()
+
+    def on_mount(self):
+        self.sub_title = self.me
+        self.query_one("#log").border_title = "Activity"
+        self.query_one("#menu").border_title = "Actions"
+        t = self.query_one(SenderTable)
+        t.marked = set()
+        t.add_column("✓", key="mark", width=2)
+        t.add_column("#", key="n")
+        t.add_column("Emails", key="count")
+        t.add_column("Sender", key="addr")
+        self.query_one("#menu").focus()
+
+    # helpers usable from worker threads
+    def say(self, msg):
+        self.call_from_thread(self.query_one(RichLog).write, msg)
+
+    def progress(self, done, total):
+        self.call_from_thread(self.query_one(ProgressBar).update, total=total, progress=done)
+
+    def ask(self, msg, on_yes):
+        self.call_from_thread(self.push_screen, Confirm(msg), lambda ok: ok and on_yes())
+
+    def start(self, fn, *args):
+        if self.busy:
+            self.notify("Still working on the previous task…", severity="warning")
+            return
+        self.busy = True
+
+        def run():
             try:
-                a, _, b = part.partition("-")
-                chosen.update(range(int(a) - 1, int(b or a)))
-            except ValueError:
-                console.print(f"[yellow]Ignoring invalid entry: {part}[/]")
-    addrs = [senders[i][0] for i in sorted(chosen) if 0 <= i < len(senders) and senders[i][0] != "(unknown)"]
-    if not addrs:
-        return
-    total = sum(dict(senders)[a] for a in addrs)
-    console.print(Panel("\n".join(addrs), title="[bold]Selected senders[/]", border_style="red", expand=False))
-    if not confirm(f"PERMANENTLY delete all emails from these {len(addrs)} senders (~{total} emails)?"):
-        return
-    deleted = 0
-    with progress() as bar:
-        task = bar.add_task("Deleting", total=len(addrs))
-        for a in addrs:
-            ids = list_ids(svc, q=f"from:{a}")
-            batch_delete(svc, ids)
+                fn(*args)
+            except Exception as e:
+                self.say(f"[b red]Error:[/] {e}")
+            finally:
+                self.busy = False
+        self.run_worker(run, thread=True)
+
+    # events
+    def on_list_view_selected(self, e):
+        key = e.item.id[2:]
+        if key in ("sender", "senders"):
+            self.query_one("#views").current = key
+            self.query_one("#addr" if key == "sender" else SenderTable).focus()
+        elif key == "drafts":
+            self.start(self.drafts_count)
+        else:
+            self.start(self.category_count, *CATEGORIES[key])
+
+    def on_input_submitted(self, e):
+        if e.value.strip():
+            self.start(self.sender_lookup, e.value.strip())
+
+    def on_button_pressed(self, e):
+        if e.button.id == "del-sender":
+            addr = self.query_one("#addr").value.strip()
+            self.push_screen(Confirm(f"Delete all [b]{len(self.sender_ids)}[/] emails from [b]{addr}[/]?"),
+                             lambda ok: ok and self.start(self.delete_senders, [addr]))
+        elif e.button.id == "scan":
+            self.start(self.scan)
+        elif e.button.id == "del-marked":
+            marked = sorted(self.query_one(SenderTable).marked)
+            if not marked:
+                self.notify("Mark senders with Space first (A marks all).", severity="warning")
+                return
+            total = sum(self.counts[a] for a in marked)
+            self.push_screen(Confirm(f"Delete all emails from [b]{len(marked)}[/] senders (~[b]{total}[/] emails)?"),
+                             lambda ok: ok and self.start(self.delete_senders, marked))
+
+    # workers (run in threads)
+    def sender_lookup(self, addr):
+        self.say(f"Looking up [cyan]{addr}[/]…")
+        self.sender_ids = ids = list_ids(self.svc, q=f"from:{addr}")
+        btn = self.query_one("#del-sender")
+        if not ids:
+            self.call_from_thread(self.query_one("#stats").update, "[dim]No emails found from that address.[/]")
+            self.call_from_thread(setattr, btn, "disabled", True)
+            return
+        grid = Table.grid(padding=(0, 3))
+        grid.add_row("[dim]Sender[/]", f"[b]{addr}[/]")
+        grid.add_row("[dim]Emails[/]", f"[b yellow]{len(ids)}[/]")
+        grid.add_row("[dim]First received[/]", msg_date(self.svc, ids[-1]))
+        grid.add_row("[dim]Most recent[/]", msg_date(self.svc, ids[0]))
+        self.call_from_thread(self.query_one("#stats").update, grid)
+        self.call_from_thread(setattr, btn, "disabled", False)
+
+    def scan(self):
+        self.say("Scanning mailbox… [dim](large mailboxes take a few minutes)[/]")
+        senders = scan_senders(self.svc, self.progress).most_common()
+        self.counts = dict(senders)
+        self.call_from_thread(self.fill_table, senders)
+        self.say(f"[green]✔[/] Found [b]{len(senders)}[/] senders, [b]{sum(self.counts.values())}[/] emails.")
+
+    def fill_table(self, senders):
+        t = self.query_one(SenderTable)
+        t.clear()
+        t.marked.clear()
+        for n, (addr, cnt) in enumerate(senders, 1):
+            t.add_row("", f"[cyan]{n}[/]", f"[b yellow]{cnt}[/]", addr, key=addr)
+        t.focus()
+
+    def delete_senders(self, addrs):
+        deleted = 0
+        for i, a in enumerate(addrs, 1):
+            ids = list_ids(self.svc, q=f"from:{a}")
+            batch_delete(self.svc, ids)
             deleted += len(ids)
-            bar.console.print(f"  [green]✔[/] {len(ids):>5}  [dim]{a}[/]")
-            bar.advance(task)
-    ok(f"Deleted {deleted} emails from {len(addrs)} senders.")
+            self.say(f"[green]✔[/] {len(ids):>5}  [dim]{a}[/]")
+            self.progress(i, len(addrs))
+            if a in self.counts:
+                self.call_from_thread(self.remove_row, a)
+        self.say(f"[b green]Deleted {deleted} emails from {len(addrs)} sender(s).[/]")
+        self.call_from_thread(setattr, self.query_one("#del-sender"), "disabled", True)
+
+    def remove_row(self, addr):
+        t = self.query_one(SenderTable)
+        t.marked.discard(addr)
+        if addr in t.rows:
+            t.remove_row(addr)
+
+    def category_count(self, label, name):
+        self.say(f"Counting emails in [cyan]{name}[/]…")
+        ids = list_ids(self.svc, labels=[label])
+        if not ids:
+            self.say(f"[dim]{name} is already empty.[/]")
+            return
+        self.ask(f"Delete [b]{len(ids)}[/] emails in [b]{name}[/]?",
+                 lambda: self.start(self.category_delete, ids, name))
+
+    def category_delete(self, ids, name):
+        batch_delete(self.svc, ids)
+        self.progress(1, 1)
+        self.say(f"[b green]✔ Deleted {len(ids)} emails from {name}.[/]")
+
+    def drafts_count(self):
+        self.say("Loading drafts…")
+        drafts = list_drafts(self.svc)
+        if not drafts:
+            self.say("[dim]No drafts.[/]")
+            return
+        self.ask(f"Delete [b]{len(drafts)}[/] drafts?", lambda: self.start(self.drafts_delete, drafts))
+
+    def drafts_delete(self, drafts):
+        for i, d in enumerate(drafts, 1):
+            self.svc.users().drafts().delete(userId="me", id=d["id"]).execute()
+            self.progress(i, len(drafts))
+        self.say(f"[b green]✔ Deleted {len(drafts)} drafts.[/]")
 
 
 def main():
-    with console.status("[cyan]Connecting to Gmail..."):
-        svc = connect()
-        me = svc.users().getProfile(userId="me").execute()["emailAddress"]
-    actions = {"1": delete_sender, "2": list_senders, "3": clear_drafts, "4": clear_spam,
-               "5": lambda svc: clear_category(svc, "CATEGORY_SOCIAL", "Social"),
-               "6": lambda svc: clear_category(svc, "CATEGORY_PROMOTIONS", "Promotions (Reclame)"),
-               "7": lambda svc: clear_category(svc, "CATEGORY_UPDATES", "Updates")}
-    items = [("1", "✉", "Delete all emails from a sender"), ("2", "☰", "List all senders (and delete)"),
-             ("3", "✎", "Clear drafts (concepts)"), ("4", "⚠", "Clear spam"), ("5", "☺", "Clear Social"),
-             ("6", "★", "Clear Promotions (Reclame)"), ("7", "↻", "Clear Updates"), ("q", "⏻", "Quit")]
-    menu = Table.grid(padding=(0, 2))
-    for key, icon, label in items:
-        menu.add_row(f"[bold cyan]{key}[/]", icon, label)
-    while True:
-        clear()
-        console.print(Panel(menu, title="[bold magenta]📬 Gmail Cleanup[/]", subtitle=f"[dim]{me}[/]",
-                            border_style="magenta", padding=(1, 3), expand=False))
-        c = Prompt.ask("[bold cyan]›[/]").strip().lower()
-        if c == "q":
-            break
-        if c in actions:
-            clear()
-            actions[c](svc)
-            Prompt.ask("\n[dim]Press Enter to return to the menu[/]", default="", show_default=False)
+    print("Connecting to Gmail…")
+    svc = connect()
+    me = svc.users().getProfile(userId="me").execute()["emailAddress"]
+    CleanupApp(svc, me).run()
 
 
 if __name__ == "__main__":
