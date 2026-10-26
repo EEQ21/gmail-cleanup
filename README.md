@@ -6,6 +6,7 @@ A simple terminal tool to clean up your Gmail fast. Find out who fills your mail
 
 - **Delete everything from a sender**: enter an email address and see how many emails they sent, when the first one arrived and when the most recent one arrived. Then permanently delete them all.
 - **Sender overview**: scan your mailbox and list every sender, sorted by how many emails they sent. Pick senders to delete by number (`1,3,5-8`) or delete them `all`.
+- **Multiple accounts**: add, switch between and remove Gmail accounts from inside the app.
 - **Clear drafts** instantly.
 - **Clear spam** instantly.
 - **Clear the Social, Promotions and Updates tabs** with one option each.
@@ -46,12 +47,13 @@ Each user needs their own (free) Google Cloud credentials:
 python cleanup.py
 ```
 
-On the first run a browser opens so you can sign in. If Google warns that the app is unverified, click **Advanced → Go to (app name)**. That's expected because it's your own app. Your login is saved to `token.json` for next time.
+On the first run a browser opens so you can sign in. If Google warns that the app is unverified, click **Advanced → Go to (app name)**. That's expected because it's your own app. Logins are saved in the `accounts/` folder, one file per account.
 
 ## 🖥️ Usage
 
 A full-screen terminal app (built with [Textual](https://github.com/Textualize/textual)) with mouse and keyboard support:
 
+- **Accounts:** add another Gmail account (opens Google sign-in), switch to the selected one, or remove it. Removing only deletes the saved login, not your emails.
 - **Left sidebar:** choose an action with `↑` `↓` and `Enter`, or click it.
 - **Delete by sender:** type an address and press `Enter` to see the email count and the first and most recent email, then click **Delete all from this sender**.
 - **All senders:** click **Scan mailbox**, then mark senders in the table with `Space` (`A` marks all, `N` unmarks all) and click **Delete marked**.
@@ -68,7 +70,7 @@ A full-screen terminal app (built with [Textual](https://github.com/Textualize/t
 
 ## 🔒 Security
 
-`credentials.json` and `token.json` are in `.gitignore`. **Never commit them.** `token.json` gives full access to your mailbox.
+`credentials.json` and the `accounts/` folder are in `.gitignore`. **Never commit them.** The files in `accounts/` give full access to your mailboxes.
 
 ## 📄 License
 

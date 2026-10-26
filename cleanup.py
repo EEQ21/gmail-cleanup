@@ -20,13 +20,15 @@ from textual.widgets import (Button, ContentSwitcher, DataTable, Footer, Header,
 
 SCOPES = ["https://mail.google.com/"]  # full scope is required for permanent delete
 DIR = os.path.dirname(os.path.abspath(__file__))
-TOKEN = os.path.join(DIR, "token.json")
+TOKEN = os.path.join(DIR, "token.json")  # pre-multi-account location, migrated on start
+ACCOUNTS = os.path.join(DIR, "accounts")
+ACTIVE = os.path.join(ACCOUNTS, "active.txt")
 CREDS = os.path.join(DIR, "credentials.json")
 
 CATEGORIES = {"spam": ("SPAM", "Spam"), "social": ("CATEGORY_SOCIAL", "Social"),
               "promo": ("CATEGORY_PROMOTIONS", "Promotions (Reclame)"),
               "updates": ("CATEGORY_UPDATES", "Updates")}
-MENU = [("sender", "[cyan]●[/] Delete by sender"), ("senders", "[cyan]●[/] All senders"),
+MENU = [("accounts", "[magenta]●[/] Accounts"), ("sender", "[cyan]●[/] Delete by sender"), ("senders", "[cyan]●[/] All senders"),
         ("drafts", "[red]●[/] Clear drafts"), ("spam", "[red]●[/] Clear spam"),
         ("social", "[red]●[/] Clear Social"), ("promo", "[red]●[/] Clear Promotions"),
         ("updates", "[red]●[/] Clear Updates")]
@@ -45,16 +47,64 @@ Pick an action on the left with [b cyan]↑ ↓[/] and [b cyan]Enter[/].
 
 # ---------- Gmail ----------
 
-def connect():
-    creds = Credentials.from_authorized_user_file(TOKEN, SCOPES) if os.path.exists(TOKEN) else None
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            creds = InstalledAppFlow.from_client_secrets_file(CREDS, SCOPES).run_local_server(port=0)
-        with open(TOKEN, "w") as f:
+def token_path(email):
+    return os.path.join(ACCOUNTS, f"{email}.json")
+
+
+def load_account(email):
+    creds = Credentials.from_authorized_user_file(token_path(email), SCOPES)
+    if not creds.valid:
+        creds.refresh(Request())
+        with open(token_path(email), "w") as f:
             f.write(creds.to_json())
     return build("gmail", "v1", credentials=creds)
+
+
+def add_account():
+    """Run Google sign-in in the browser and save the token. Returns (email, service)."""
+    creds = InstalledAppFlow.from_client_secrets_file(CREDS, SCOPES).run_local_server(
+        port=0, prompt="select_account", authorization_prompt_message="")
+    svc = build("gmail", "v1", credentials=creds)
+    email = svc.users().getProfile(userId="me").execute()["emailAddress"]
+    os.makedirs(ACCOUNTS, exist_ok=True)
+    with open(token_path(email), "w") as f:
+        f.write(creds.to_json())
+    return email, svc
+
+
+def list_accounts():
+    if not os.path.isdir(ACCOUNTS):
+        return []
+    return sorted(f[:-5] for f in os.listdir(ACCOUNTS) if f.endswith(".json"))
+
+
+def set_active(email):
+    os.makedirs(ACCOUNTS, exist_ok=True)
+    with open(ACTIVE, "w") as f:
+        f.write(email)
+
+
+def get_active():
+    accounts = list_accounts()
+    if os.path.exists(ACTIVE):
+        with open(ACTIVE) as f:
+            email = f.read().strip()
+        if email in accounts:
+            return email
+    return accounts[0] if accounts else None
+
+
+def migrate_old_token():
+    if os.path.exists(TOKEN) and not list_accounts():
+        creds = Credentials.from_authorized_user_file(TOKEN, SCOPES)
+        if not creds.valid:
+            creds.refresh(Request())
+        email = build("gmail", "v1", credentials=creds).users().getProfile(userId="me").execute()["emailAddress"]
+        os.makedirs(ACCOUNTS, exist_ok=True)
+        with open(token_path(email), "w") as f:
+            f.write(creds.to_json())
+        os.remove(TOKEN)
+        set_active(email)
 
 
 def list_ids(svc, q=None, labels=None):
@@ -121,17 +171,17 @@ def scan_senders(svc, on_progress):
 class Confirm(ModalScreen[bool]):
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, msg):
+    def __init__(self, msg, title="Permanent delete", action="Delete"):
         super().__init__()
-        self.msg = msg
+        self.msg, self.title, self.action = msg, title, action
 
     def compose(self):
         with Vertical(id="dialog"):
-            yield Label("[b red]Permanent delete[/]")
+            yield Label(f"[b red]{self.title}[/]")
             yield Label(self.msg, id="question")
             with Horizontal(id="buttons"):
                 yield Button("Cancel", id="no")
-                yield Button("Delete", variant="error", id="yes")
+                yield Button(self.action, variant="error", id="yes")
 
     def on_mount(self):
         self.query_one("#no").focus()
@@ -178,7 +228,8 @@ class CleanupApp(App):
     #stats { height: auto; margin: 1 0; }
     .bar { height: auto; }
     .bar Button { margin-right: 2; }
-    SenderTable { height: 1fr; border: round $primary; }
+    SenderTable, #acc-table { height: 1fr; border: round $primary; }
+    #accounts { padding: 1 0 0 0; }
     #progress { height: 1; margin: 1 0 0 0; }
     #log { height: 9; border: round $primary; }
     Confirm { align: center middle; }
@@ -200,6 +251,12 @@ class CleanupApp(App):
             with Vertical(id="main"):
                 with ContentSwitcher(initial="home", id="views"):
                     yield Static(WELCOME, id="home")
+                    with Vertical(id="accounts"):
+                        with Horizontal(classes="bar"):
+                            yield Button("Add account", variant="primary", id="acc-add")
+                            yield Button("Switch to selected", variant="success", id="acc-switch")
+                            yield Button("Remove selected", variant="error", id="acc-remove")
+                        yield DataTable(id="acc-table", cursor_type="row", zebra_stripes=True)
                     with Vertical(id="sender"):
                         yield Input(placeholder="sender@example.com  (Enter to look up)", id="addr")
                         yield Static(id="stats")
@@ -223,12 +280,43 @@ class CleanupApp(App):
         t.add_column("#", key="n")
         t.add_column("Emails", key="count")
         t.add_column("Sender", key="addr")
+        acc = self.query_one("#acc-table", DataTable)
+        acc.add_column("", key="active", width=2)
+        acc.add_column("Account", key="email")
+        self.fill_accounts()
         self.query_one("#menu").focus()
+        self.refresh_counts()
+
+    def fill_accounts(self):
+        t = self.query_one("#acc-table", DataTable)
+        t.clear()
+        for email in list_accounts():
+            t.add_row("[b green]✔[/]" if email == self.me else "", email, key=email)
+
+    def selected_account(self):
+        t = self.query_one("#acc-table", DataTable)
+        return t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value if t.row_count else None
+
+    def switch_to(self, email, svc=None):
+        """Main thread: make `email` the active account and reset per-account state."""
+        self.svc, self.me = svc or load_account(email), email
+        set_active(email)
+        self.sub_title = email
+        self.sender_ids, self.counts = [], {}
+        self.query_one(SenderTable).clear()
+        self.query_one(SenderTable).marked.clear()
+        self.query_one("#stats").update("")
+        self.query_one("#addr").value = ""
+        self.query_one("#del-sender").disabled = True
+        self.fill_accounts()
+        self.query_one(RichLog).write(f"[b magenta]Switched to {email}[/]")
         self.refresh_counts()
 
     def refresh_counts(self):
         def run():
             for key, label in COUNTED.items():
+                if self.svc is None:
+                    break
                 try:
                     n = self.svc.users().labels().get(userId="me", id=label).execute()["messagesTotal"]
                 except Exception:
@@ -248,6 +336,9 @@ class CleanupApp(App):
         self.call_from_thread(self.push_screen, Confirm(msg), lambda ok: ok and on_yes())
 
     def start(self, fn, *args):
+        if self.svc is None and fn != self.account_add:
+            self.notify("Add an account first (Accounts).", severity="warning")
+            return
         if self.busy:
             self.notify("Still working on the previous task…", severity="warning")
             return
@@ -266,9 +357,9 @@ class CleanupApp(App):
     # events
     def on_list_view_selected(self, e):
         key = e.item.id[2:]
-        if key in ("sender", "senders"):
+        if key in ("sender", "senders", "accounts"):
             self.query_one("#views").current = key
-            self.query_one("#addr" if key == "sender" else SenderTable).focus()
+            self.query_one({"sender": "#addr", "senders": "#table", "accounts": "#acc-table"}[key]).focus()
         elif key == "drafts":
             self.start(self.drafts_count)
         else:
@@ -283,6 +374,20 @@ class CleanupApp(App):
             addr = self.query_one("#addr").value.strip()
             self.push_screen(Confirm(f"Delete all [b]{len(self.sender_ids)}[/] emails from [b]{addr}[/]?"),
                              lambda ok: ok and self.start(self.delete_senders, [addr]))
+        elif e.button.id == "acc-add":
+            self.start(self.account_add)
+        elif e.button.id == "acc-switch":
+            email = self.selected_account()
+            if self.busy:
+                self.notify("Wait for the current task to finish.", severity="warning")
+            elif email and email != self.me:
+                self.switch_to(email)
+        elif e.button.id == "acc-remove":
+            email = self.selected_account()
+            if email:
+                self.push_screen(Confirm(f"Remove [b]{email}[/] from this tool?\n[dim]Your emails are not touched; "
+                                         "you can add the account again later.[/]", "Remove account", "Remove"),
+                                 lambda ok: ok and self.remove_account(email))
         elif e.button.id == "scan":
             self.start(self.scan)
         elif e.button.id == "del-marked":
@@ -294,7 +399,29 @@ class CleanupApp(App):
             self.push_screen(Confirm(f"Delete all emails from [b]{len(marked)}[/] senders (~[b]{total}[/] emails)?"),
                              lambda ok: ok and self.start(self.delete_senders, marked))
 
+    def remove_account(self, email):
+        if self.busy:
+            self.notify("Wait for the current task to finish.", severity="warning")
+            return
+        os.remove(token_path(email))
+        self.query_one(RichLog).write(f"Removed account [cyan]{email}[/]")
+        rest = list_accounts()
+        if email != self.me:
+            self.fill_accounts()
+        elif rest:
+            self.switch_to(rest[0])
+        else:
+            self.notify("No accounts left — add one to continue.", severity="warning")
+            self.svc, self.me, self.sub_title = None, None, "no account"
+            self.fill_accounts()
+
     # workers (run in threads)
+    def account_add(self):
+        self.say("Opening Google sign-in in your browser…")
+        email, svc = add_account()
+        self.say(f"[green]✔[/] Added [b]{email}[/]")
+        self.call_from_thread(self.switch_to, email, svc)
+
     def sender_lookup(self, addr):
         self.say(f"Looking up [cyan]{addr}[/]…")
         self.sender_ids = ids = list_ids(self.svc, q=f"from:{addr}")
@@ -375,10 +502,16 @@ class CleanupApp(App):
 
 
 def main():
-    print("Connecting to Gmail…")
-    svc = connect()
-    me = svc.users().getProfile(userId="me").execute()["emailAddress"]
-    CleanupApp(svc, me).run()
+    migrate_old_token()
+    email = get_active()
+    if email is None:
+        print("No account yet, opening Google sign-in in your browser…")
+        email, svc = add_account()
+    else:
+        print(f"Connecting to {email}…")
+        svc = load_account(email)
+    set_active(email)
+    CleanupApp(svc, email).run()
 
 
 if __name__ == "__main__":
