@@ -10,7 +10,7 @@ A simple terminal tool to clean up your Gmail fast. Find out who fills your mail
 - **Clear spam** instantly.
 - **Clear the Social, Promotions and Updates tabs** with one option each.
 - **Safe by default**: every delete shows what will be removed and asks you to type `yes`.
-- **Full-screen TUI** with sidebar, sortable sender table, progress bar and activity log.
+- **Full-screen TUI** with sidebar, sender table, progress bar and activity log.
 - Runs locally. Your mail goes only between your computer and Google.
 
 > ⚠️ **Deletes are permanent.** Emails skip the Trash and cannot be recovered.
