@@ -30,6 +30,7 @@ MENU = [("sender", "[cyan]●[/] Delete by sender"), ("senders", "[cyan]●[/] A
         ("drafts", "[red]●[/] Clear drafts"), ("spam", "[red]●[/] Clear spam"),
         ("social", "[red]●[/] Clear Social"), ("promo", "[red]●[/] Clear Promotions"),
         ("updates", "[red]●[/] Clear Updates")]
+COUNTED = {"drafts": "DRAFT", **{k: label for k, (label, _) in CATEGORIES.items()}}
 WELCOME = """[b magenta]Gmail Cleanup[/]
 
 Pick an action on the left with [b cyan]↑ ↓[/] and [b cyan]Enter[/].
@@ -194,7 +195,8 @@ class CleanupApp(App):
     def compose(self):
         yield Header()
         with Horizontal():
-            yield ListView(*[ListItem(Label(t), id=f"m-{k}") for k, t in MENU], id="menu")
+            yield ListView(*[ListItem(Label(t + (" [dim](…)[/]" if k in COUNTED else ""), id=f"l-{k}"),
+                                      id=f"m-{k}") for k, t in MENU], id="menu")
             with Vertical(id="main"):
                 with ContentSwitcher(initial="home", id="views"):
                     yield Static(WELCOME, id="home")
@@ -222,6 +224,18 @@ class CleanupApp(App):
         t.add_column("Emails", key="count")
         t.add_column("Sender", key="addr")
         self.query_one("#menu").focus()
+        self.refresh_counts()
+
+    def refresh_counts(self):
+        def run():
+            for key, label in COUNTED.items():
+                try:
+                    n = self.svc.users().labels().get(userId="me", id=label).execute()["messagesTotal"]
+                except Exception:
+                    n = "?"
+                text = dict(MENU)[key] + f" [dim]({n})[/]"
+                self.call_from_thread(self.query_one(f"#l-{key}", Label).update, text)
+        self.run_worker(run, thread=True, group="counts")
 
     # helpers usable from worker threads
     def say(self, msg):
@@ -246,6 +260,7 @@ class CleanupApp(App):
                 self.say(f"[b red]Error:[/] {e}")
             finally:
                 self.busy = False
+                self.call_from_thread(self.refresh_counts)
         self.run_worker(run, thread=True)
 
     # events
