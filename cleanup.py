@@ -26,10 +26,11 @@ CREDS = os.path.join(DIR, "credentials.json")
 CATEGORIES = {"spam": ("SPAM", "Spam"), "social": ("CATEGORY_SOCIAL", "Social"),
               "promo": ("CATEGORY_PROMOTIONS", "Promotions (Reclame)"),
               "updates": ("CATEGORY_UPDATES", "Updates")}
-MENU = [("sender", "✉  Delete by sender"), ("senders", "☰  All senders"), ("drafts", "✎  Clear drafts"),
-        ("spam", "⚠  Clear spam"), ("social", "☺  Clear Social"), ("promo", "★  Clear Promotions"),
-        ("updates", "↻  Clear Updates")]
-WELCOME = """[b magenta]📬 Gmail Cleanup[/]
+MENU = [("sender", "[cyan]●[/] Delete by sender"), ("senders", "[cyan]●[/] All senders"),
+        ("drafts", "[red]●[/] Clear drafts"), ("spam", "[red]●[/] Clear spam"),
+        ("social", "[red]●[/] Clear Social"), ("promo", "[red]●[/] Clear Promotions"),
+        ("updates", "[red]●[/] Clear Updates")]
+WELCOME = """[b magenta]Gmail Cleanup[/]
 
 Pick an action on the left with [b cyan]↑ ↓[/] and [b cyan]Enter[/].
 
@@ -125,7 +126,7 @@ class Confirm(ModalScreen[bool]):
 
     def compose(self):
         with Vertical(id="dialog"):
-            yield Label("[b red]⚠  Permanent delete[/]")
+            yield Label("[b red]Permanent delete[/]")
             yield Label(self.msg, id="question")
             with Horizontal(id="buttons"):
                 yield Button("Cancel", id="no")
@@ -166,7 +167,7 @@ class SenderTable(DataTable):
 
 
 class CleanupApp(App):
-    TITLE = "📬 Gmail Cleanup"
+    TITLE = "Gmail Cleanup"
     CSS = """
     #menu { width: 30; border: round $accent; }
     #main { padding: 0 1; }
