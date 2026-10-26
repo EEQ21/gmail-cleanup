@@ -85,6 +85,15 @@ def clear_spam(svc):
         print(f"Deleted {len(ids)} spam emails.")
 
 
+def clear_category(svc, label, name):
+    ids = list_ids(svc, labels=[label])
+    if not ids:
+        print(f"{name} is already empty.")
+    elif confirm(f"Permanently delete {len(ids)} emails in {name}?"):
+        batch_delete(svc, ids)
+        print(f"Deleted {len(ids)} emails from {name}.")
+
+
 def clear_drafts(svc):
     drafts, token = [], None
     while True:
@@ -170,12 +179,16 @@ def list_senders(svc):
 def main():
     svc = connect()
     me = svc.users().getProfile(userId="me").execute()["emailAddress"]
-    actions = {"1": delete_sender, "2": list_senders, "3": clear_drafts, "4": clear_spam}
+    actions = {"1": delete_sender, "2": list_senders, "3": clear_drafts, "4": clear_spam,
+               "5": lambda svc: clear_category(svc, "CATEGORY_SOCIAL", "Social"),
+               "6": lambda svc: clear_category(svc, "CATEGORY_PROMOTIONS", "Promotions (Reclame)"),
+               "7": lambda svc: clear_category(svc, "CATEGORY_UPDATES", "Updates")}
     while True:
         clear()
         print(f"Gmail Cleanup - {me}\n")
         print("1) Delete all emails from a sender\n2) List all senders (and delete)\n"
-              "3) Clear drafts (concepts)\n4) Clear spam\nq) Quit")
+              "3) Clear drafts (concepts)\n4) Clear spam\n"
+              "5) Clear Social\n6) Clear Promotions (Reclame)\n7) Clear Updates\nq) Quit")
         c = input("> ").strip().lower()
         if c == "q":
             break

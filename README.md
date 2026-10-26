@@ -8,6 +8,7 @@ A simple terminal tool to clean up your Gmail fast. Find out who fills your mail
 - **Sender overview**: scan your mailbox and list every sender, sorted by how many emails they sent. Pick senders to delete by number (`1,3,5-8`) or delete them `all`.
 - **Clear drafts** instantly.
 - **Clear spam** instantly.
+- **Clear the Social, Promotions and Updates tabs** with one option each.
 - **Safe by default**: every delete shows what will be removed and asks you to type `yes`.
 - Runs locally. Your mail goes only between your computer and Google.
 
@@ -55,6 +56,9 @@ Gmail Cleanup - you@gmail.com
 2) List all senders (and delete)
 3) Clear drafts (concepts)
 4) Clear spam
+5) Clear Social
+6) Clear Promotions (Reclame)
+7) Clear Updates
 q) Quit
 ```
 
